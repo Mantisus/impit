@@ -19,7 +19,6 @@ type SharedStream =
 pub struct PyResponseBytesIterator {
     ready_content: Option<Vec<u8>>,
     stream: Option<Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send + Sync>>>,
-    runtime: tokio::runtime::Handle,
     content_returned: bool,
     parent_response: Option<Py<ImpitPyResponse>>,
 }
@@ -49,10 +48,12 @@ impl PyResponseBytesIterator {
             }
         }
 
-        let runtime = slf.runtime.clone();
-
         if let Some(stream) = &mut slf.stream {
-            match runtime.block_on(stream.next()) {
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(stream.next())
+            });
+
+            match result {
                 Some(Ok(chunk)) => Ok(Some(chunk.to_vec())),
                 Some(Err(e)) => {
                     slf.content_returned = true;
@@ -293,7 +294,6 @@ impl ImpitPyResponse {
     }
 
     fn iter_bytes(slf: Py<Self>, py: Python) -> PyResult<PyResponseBytesIterator> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime().handle().clone();
         let mut slf_ref = slf.borrow_mut(py);
 
         match slf_ref.inner_state {
@@ -304,7 +304,6 @@ impl ImpitPyResponse {
                 Ok(PyResponseBytesIterator {
                     ready_content: content,
                     stream: None,
-                    runtime,
                     content_returned: false,
                     parent_response: Some(slf),
                 })
@@ -325,7 +324,6 @@ impl ImpitPyResponse {
                 Ok(PyResponseBytesIterator {
                     ready_content: None,
                     stream: Some(stream),
-                    runtime,
                     content_returned: false,
                     parent_response: Some(slf),
                 })
@@ -336,7 +334,6 @@ impl ImpitPyResponse {
             }
         }
     }
-
     fn aread(slf: Py<Self>, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (state, response_option, content_option, is_stream_consumed) =
@@ -437,12 +434,14 @@ impl ImpitPyResponse {
                     .take()
                     .ok_or(ImpitPyError(impit::errors::ImpitError::StreamClosed))?;
 
-                let content = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
-                    response
-                        .bytes()
-                        .await
-                        .map(|b| b.to_vec())
-                        .map_err(|_| ImpitPyError(impit::errors::ImpitError::NetworkError))
+                let content = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        response
+                            .bytes()
+                            .await
+                            .map(|b| b.to_vec())
+                            .map_err(|_| ImpitPyError(impit::errors::ImpitError::NetworkError))
+                    })
                 })?;
 
                 self.content = Some(content.clone());
@@ -494,8 +493,10 @@ impl ImpitPyResponse {
             .and_then(|ct| ct.into());
 
         let (content, inner_state, encoding, inner, is_closed, is_stream_consumed) = if !stream {
-            let content = pyo3_async_runtimes::tokio::get_runtime()
-                .block_on(async { val.bytes().await.map(|b| b.to_vec()).unwrap_or_default() });
+            let content = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { val.bytes().await.map(|b| b.to_vec()).unwrap_or_default() })
+            });
             let encoding = preferred_encoding
                 .and_then(|e| encoding_from_whatwg_label(&e))
                 .or(content_type_charset)

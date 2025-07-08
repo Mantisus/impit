@@ -2,7 +2,6 @@ use std::{collections::HashMap, time::Duration};
 
 use impit::{emulation::Browser, errors::ImpitError, impit::ImpitBuilder, request::RequestOptions};
 use pyo3::{exceptions::PyTypeError, ffi::c_str, prelude::*};
-use tokio::sync::oneshot;
 
 use crate::{
     cookies::PythonCookieJar, errors::ImpitPyError, request::form_to_bytes,
@@ -21,7 +20,7 @@ impl AsyncClient {
         slf: Py<Self>,
         py: Python<'_>,
     ) -> Result<pyo3::Bound<'_, pyo3::PyAny>, pyo3::PyErr> {
-        pyo3_async_runtimes::async_std::future_into_py::<_, Py<AsyncClient>>(py, async { Ok(slf) })
+        pyo3_async_runtimes::tokio::future_into_py::<_, Py<AsyncClient>>(py, async { Ok(slf) })
     }
 
     pub fn __aexit__<'python>(
@@ -31,7 +30,7 @@ impl AsyncClient {
         _traceback: &crate::Bound<'_, crate::PyAny>,
         py: Python<'python>,
     ) -> Result<pyo3::Bound<'python, pyo3::PyAny>, pyo3::PyErr> {
-        pyo3_async_runtimes::async_std::future_into_py::<_, ()>(py, async { Ok(()) })
+        pyo3_async_runtimes::tokio::future_into_py::<_, ()>(py, async { Ok(()) })
     }
 
     #[new]
@@ -396,12 +395,11 @@ impl AsyncClient {
             http3_prior_knowledge: force_http3.unwrap_or(false),
         };
 
-        let (tx, rx) = oneshot::channel();
-
         let impit_config = self.impit_config.clone();
         let method = method.to_string();
+        let default_encoding = self.default_encoding.clone();
 
-        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::future_into_py::<_, ImpitPyResponse>(py, async move {
             let mut impit = impit_config.build();
 
             let response = match method.to_lowercase().as_str() {
@@ -415,14 +413,6 @@ impl AsyncClient {
                 "delete" => impit.delete(url, Some(options)).await,
                 _ => Err(ImpitError::InvalidMethod(method.to_string())),
             };
-
-            tx.send(response).unwrap();
-        });
-
-        let default_encoding = self.default_encoding.clone();
-
-        pyo3_async_runtimes::async_std::future_into_py::<_, ImpitPyResponse>(py, async move {
-            let response = rx.await.unwrap();
 
             response
                 .map(|response| {
